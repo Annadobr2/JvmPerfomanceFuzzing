@@ -20,8 +20,8 @@ repositories {
 dependencies {
     testImplementation(kotlin("test"))
     implementation(kotlin("stdlib-jdk8"))
-    implementation("com.fasterxml.jackson.core:jackson-databind:2.0.1")
-    implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.18.+")
+    implementation("com.fasterxml.jackson.core:jackson-databind:2.17.0")
+    implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.17.0")
 
     implementation("org.openjdk.jmh:jmh-core:1.37")
     kapt("org.openjdk.jmh:jmh-generator-annprocess:1.37")
@@ -43,13 +43,37 @@ dependencies {
     implementation("org.soot-oss:soot:4.6.0")
 
     implementation("org.jetbrains.kotlinx:kotlinx-cli:0.3.6")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
+}
+
+tasks.withType<JavaExec> {
+    jvmArgs("-Dfile.encoding=UTF-8")
 }
 
 tasks.test {
     useJUnitPlatform()
 }
 kotlin {
-    jvmToolchain(11)
+    jvmToolchain(17)
+}
+
+kapt {
+    javacOptions {
+        option("--release", "17")
+    }
+}
+
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+}
+
+tasks.withType<JavaCompile> {
+    sourceCompatibility = "17"
+    targetCompatibility = "17"
 }
 
 tasks.jar {
@@ -87,24 +111,44 @@ tasks.register("buildDockerImage") {
 
 tasks.register("runDockerContainer") {
     group = "docker"
-    description = "Запускает Docker-контейнер с маунтом папки для аномалий."
+    description = "Запускает Docker-контейнер с маунтом папки для аномалий и конфигурацией из .env."
 
     doLast {
-        val anomaliesDir = "$buildDir/anomalies"
-        val containerName = "fuzzer-container"
+        val anomaliesDir    = "${projectDir}/anomalies"
+        val dataDir         = "${projectDir}/data"
+        val generatedDir    = "${projectDir}/src/test/resources/GeneratedFromBugs"
+        val containerName   = "fuzzer-container"
+        val envFile         = file("${projectDir}/.env")
 
-        // Создаем папку для аномалий, если её ещё нет
+        // Создаём локальные директории, чтобы Docker не монтировал несуществующие пути
         mkdir(anomaliesDir)
+        mkdir("$dataDir/openjdk_bugs")
+        mkdir(generatedDir)
 
-        // Запускаем контейнер
-        exec {
-            commandLine(
-                "docker", "run", "--rm", "-it",
-                "-v", "$anomaliesDir:/app/anomalies", // Маунт папки
-                "--name", containerName,
-                "fuzzer-framework"
-            )
+        if (!envFile.exists()) {
+            logger.warn("[Docker] Файл .env не найден. Скопируйте .env.example → .env и заполните значения.")
         }
+
+        val cmd = mutableListOf(
+            "docker", "run", "--rm", "-it",
+            "-v", "$anomaliesDir:/app/anomalies",
+            "-v", "$dataDir:/app/data",
+            "-v", "$generatedDir:/app/src/test/resources/GeneratedFromBugs",
+            "--name", containerName,
+        )
+
+        // прокинуть .env если он существует, иначе переменные окружения
+        if (envFile.exists()) {
+            cmd += listOf("--env-file", envFile.absolutePath)
+        } else {
+            listOf("LLM_PROVIDER", "LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL").forEach { key ->
+                System.getenv(key)?.let { cmd += listOf("-e", "$key=$it") }
+            }
+        }
+
+        cmd += "fuzzer-framework"
+
+        exec { commandLine(cmd) }
     }
 }
 

@@ -65,3 +65,6 @@ anomalies
 confirmed_anomalies
 temp_verification
 src/main/resources/jvm_config.json
+
+.env
+src/main/resources/setting.json

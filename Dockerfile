@@ -79,8 +79,9 @@ ENV JAVA_AXIOM=/usr/lib/jvm/axiomjdk-java17-amd64/bin/java
 WORKDIR /app
 COPY . /app
 
-# Создаём конфигурационный файл для JVM путей
 RUN mkdir -p /app/src/main/resources/
+
+# jvm_config.json — пути к JVM внутри контейнера
 RUN echo '{ \
   "HotSpotJvm": "/usr/local/openjdk-17/bin/java", \
   "OpenJ9Jvm": "/opt/openj9/bin/java", \
@@ -88,12 +89,32 @@ RUN echo '{ \
   "AxiomJvm": "/usr/lib/jvm/axiomjdk-java17-amd64/bin/java" \
 }' > /app/src/main/resources/jvm_config.json
 
-# Сборка проекта
+# настройки для модели
+RUN echo '{ \
+  "provider": "OPENAI", \
+  "baseUrl": "", \
+  "apiKey": "", \
+  "model": "", \
+  "temperature": 0.3, \
+  "topP": 0.9, \
+  "maxTokens": 16000, \
+  "timeoutSeconds": 200 \
+}' > /app/src/main/resources/setting.json
+
+# Сборка JAR — запекает setting.json без секретов
 RUN chmod +x ./gradlew \
- && ./gradlew compileJava -x test \
  && ./gradlew clean jar -x test
 
-# Создаём папку для результатов
-RUN mkdir -p /app/anomalies
+RUN mkdir -p /app/anomalies \
+             /app/data/openjdk_bugs \
+             /app/src/test/resources/GeneratedFromBugs \
+             /app/src/test/resources/InitialSeedExamples
+
+# Объявляем переменные окружения — должны быть переданы при docker run
+ENV LLM_PROVIDER="" \
+    LLM_API_KEY="" \
+    LLM_BASE_URL="" \
+    LLM_MODEL=""
 
 ENTRYPOINT ["java", "-jar", "build/libs/JvmPerfomanceFuzzing-1.0.jar"]
+CMD ["-n", "100"]
