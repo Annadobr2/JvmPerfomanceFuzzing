@@ -3,8 +3,10 @@ package core
 import core.mutation.AdaptiveMutator
 import core.mutation.Mutator
 import core.seed.BytecodeEntry
+import core.seed.JavaCode
 import core.seed.Seed
 import core.seed.SeedManager
+import infrastructure.bytecode.JavaByteCodeProvider
 import infrastructure.jvm.JITLoggingOptionsProvider
 import infrastructure.jvm.JvmExecutor
 import infrastructure.performance.PerformanceAnalyzer
@@ -16,6 +18,7 @@ import infrastructure.performance.entity.SignificanceLevel
 import infrastructure.performance.verify.AnomalyVerifier
 import infrastructure.performance.verify.VerificationPurpose
 import java.io.File
+import kotlin.random.Random
 
 /**
  * Основной движок эволюционного фаззинга, координирующий процесс мутации,
@@ -30,15 +33,16 @@ class EvolutionaryFuzzer(
     private val jitOptionsProvider: JITLoggingOptionsProvider? = null,
     private val maxIterations: Int = 100_000,
     private val stagnationThreshold: Int = 1000,
-    private val initialEnergy: Int = 10
+    private val initialEnergy: Int = 10,
+    // Вероятность выбора LLM-пути мутации: 5/(5+3) ≈ 0.625
+    // Остаток (3/8) идёт на классический байткод-путь (Jimple/ASM)
+    private val llmMutationProbability: Double = 5.0 / 8.0
 ) : Fuzzer {
 
-    override fun fuzz(
-        initialEntries: List<BytecodeEntry>,
-        jvmExecutors: List<JvmExecutor>,
-        jvmOptions: List<String>
-    ) {
-        val initialSeeds = createInitialSeeds(initialEntries)
+    override fun fuzz(initialEntries: List<BytecodeEntry>, javaCodeList: List<String>, jvmExecutors: List<JvmExecutor>, jvmOptions: List<String>) {
+
+
+        val initialSeeds = createInitialSeeds(initialEntries, javaCodeList)
         val addedCount = seedManager.addInitialSeeds(initialSeeds)
 
         var iterations = 0
@@ -49,6 +53,7 @@ class EvolutionaryFuzzer(
 
         while (iterations < maxIterations && iterationsWithoutNewSeeds < stagnationThreshold) {
             anomalyVerifier.onNewIteration()
+            //
             if (anomalyVerifier.shouldPerformDetailedCheck()) {
                 val confirmedCount = anomalyVerifier.performDetailedCheck(jvmExecutors, jvmOptions)
                 totalAnomaliesFound += confirmedCount
@@ -59,7 +64,7 @@ class EvolutionaryFuzzer(
                     "Энергия: ${selectedSeed.energy} | Интересность: ${selectedSeed.interestingness}")
 
             // Мутация байткода
-            val (mutatedBytecode, wasMutated) = mutateBytecode(selectedSeed)
+            val (mutatedBytecode, wasMutated, mutatedJavaCode) = mutateBytecode(selectedSeed)
             if (!wasMutated) {
                 iterations++
                 continue
@@ -82,6 +87,7 @@ class EvolutionaryFuzzer(
                 // Обработка найденных аномалий
                 val newSeed = createSeedFromMutation(
                     selectedSeed,
+                    mutatedJavaCode,
                     mutatedBytecode,
                     bytecodeEntry.className,
                     bytecodeEntry.packageName,
@@ -106,10 +112,14 @@ class EvolutionaryFuzzer(
         println("Финальный размер пула сидов: ${seedManager.getSeedCount()}")
     }
 
-    private fun createInitialSeeds(entries: List<BytecodeEntry>): List<Seed> =
-        entries.mapIndexed { index, entry ->
+    private fun createInitialSeeds(
+        entries: List<BytecodeEntry>,
+        javaCodeList: List<String>
+        ): List<Seed> =
+        entries.zip(javaCodeList).mapIndexed { index, (entry, code) ->
             Seed(
                 bytecodeEntry = entry,
+                javacode = code,
                 mutationHistory = mutableListOf(),
                 energy = initialEnergy,
                 description = entry.description.ifEmpty { "initial_$index" },
@@ -117,21 +127,39 @@ class EvolutionaryFuzzer(
             )
         }
 
-    private fun mutateBytecode(seed: Seed): Pair<ByteArray, Boolean> {
+    private fun mutateBytecode(seed: Seed): Triple<ByteArray, Boolean, String> {
+
         val originalBytecode = seed.bytecodeEntry.bytecode
+        val originalJavaCode = seed.javacode
         val className = seed.bytecodeEntry.className
         val packageName = seed.bytecodeEntry.packageName
 
-        val mutatedBytecode = mutator.mutate(originalBytecode, className, packageName)
+        val mutatedBytecode: ByteArray
+        val mutatedJavaCode: String
+
+        if (Random.nextDouble() < llmMutationProbability) {
+            // LLM-путь (5/8): стратегия генерирует Java-исходник и компилирует его в байткод.
+            // null байткод → модель вернула невалидный код или javac упал — считаем итерацию пустой.
+            println("Мутация через LLM")
+            val (newBytecode, newJavaCode) = mutator.mutate(originalJavaCode, className, packageName)
+            mutatedBytecode = newBytecode ?: originalBytecode
+            mutatedJavaCode = newJavaCode
+        } else {
+            // Байткод-путь (3/8): классические Jimple/ASM стратегии.
+            println("Мутация через Bytecode (Jimple/ASM)")
+            mutatedBytecode = mutator.mutate(originalBytecode, className, packageName)
+            mutatedJavaCode = originalJavaCode
+        }
 
         val wasMutated = !mutatedBytecode.contentEquals(originalBytecode)
+
         if (!wasMutated) {
             println("Мутация не произвела изменений, пропускаем")
         } else {
             saveBytecode(mutatedBytecode, packageName, className)
         }
 
-        return Pair(mutatedBytecode, wasMutated)
+        return Triple(mutatedBytecode, wasMutated, mutatedJavaCode)
     }
 
     private fun saveBytecode(bytecode: ByteArray, packageName: String, className: String) {
@@ -163,6 +191,7 @@ class EvolutionaryFuzzer(
 
     private fun createSeedFromMutation(
         parentSeed: Seed,
+        mutatedJavaCode: String,
         mutatedBytecode: ByteArray,
         className: String,
         packageName: String,
@@ -181,6 +210,7 @@ class EvolutionaryFuzzer(
 
         return Seed(
             bytecodeEntry = BytecodeEntry(mutatedBytecode, className, packageName),
+            javacode = mutatedJavaCode,
             mutationHistory = newMutationHistory,
             anomalies = analysisResult.anomalies,
             iteration = iteration,

@@ -13,6 +13,7 @@ interface Fuzzer {
      */
     fun fuzz(
         initialEntries: List<BytecodeEntry>,
+        javaCodeList: List<String>,
         jvmExecutors: List<JvmExecutor>,
         jvmOptions: List<String> = emptyList()
     )
