@@ -143,10 +143,12 @@ class FileAnomalyRepository(
         val interestingness = (seedInfo["interestingness"] as Number).toDouble()
         val verified = seedInfo["verified"] as Boolean
         val description = seedInfo["description"] as String
+        val javacode = seedInfo["javacode"] as? String ?: ""
         val energy = Seed.calculateEnergy(interestingness)
 
         return Seed(
             bytecodeEntry = bytecodeEntry,
+            javacode = javacode,
             mutationHistory = mutationHistory,
             energy = energy,
             description = description,
@@ -183,6 +185,7 @@ class FileAnomalyRepository(
             "description" to seed.description,
             "className" to seed.bytecodeEntry.className,
             "packageName" to seed.bytecodeEntry.packageName,
+            "javacode" to seed.javacode,
             "mutationHistory" to seed.mutationHistory,
             "interestingness" to seed.interestingness,
             "verified" to seed.verified,
