@@ -50,7 +50,7 @@ class PerformanceMeasurerImpl : PerformanceMeasurer {
             val jvmOptions = jvmOptionsProvider(executor)
             val jvmName = executor::class.simpleName ?: "unknown"
 
-            val fullClasspath = "${classpath.absolutePath}:$jmhClasspath"
+            val fullClasspath = "${classpath.absolutePath}${File.pathSeparator}$jmhClasspath"
             val relativeBenchmarkPath = "$packageName.$BENCHMARK_CLASS_NAME"
 
             val jmhResult = executor.execute(
@@ -104,8 +104,8 @@ class PerformanceMeasurerImpl : PerformanceMeasurer {
 
         fileManager.use { manager ->
             val compilationUnits = manager.getJavaFileObjectsFromFiles(listOf(benchmarkFile))
-            val compileClasspath = "${classpath.absolutePath}:${getJmhClasspath()}"
-            val options = listOf("-d", classpath.absolutePath, "-cp", compileClasspath)
+            val compileClasspath = "${classpath.absolutePath}${File.pathSeparator}${getJmhClasspath()}"
+            val options = listOf("-d", classpath.absolutePath, "-cp", compileClasspath, "--release", "17")
 
             val task = compiler.getTask(null, manager, null, options, null, compilationUnits)
 
@@ -169,7 +169,7 @@ class PerformanceMeasurerImpl : PerformanceMeasurer {
             private int iterations = 0;
 
             @Benchmark
-            public void benchmarkMethod() {
+            public void benchmarkMethod() throws Exception {
                 instance.main(null);
             }
 
@@ -200,7 +200,7 @@ class PerformanceMeasurerImpl : PerformanceMeasurer {
                     .measurementTime(TimeValue.seconds(${jmhOptions.measurementTimeSeconds}))
                     .forks(${jmhOptions.forks})
                     .resultFormat(ResultFormatType.JSON)
-                    .result("$resultFileName")
+                    .result("${resultFileName.replace("\\", "/")}")
                     .build();
 
                 new Runner(opt).run();
@@ -219,7 +219,12 @@ class PerformanceMeasurerImpl : PerformanceMeasurer {
         }
 
         return try {
-            if (!jsonResultFile.exists()) {
+            if (!jsonResultFile.exists() || jsonResultFile.length() == 0L) {
+                println("[JMH ERROR] [$jvmName] Файл результатов отсутствует или пуст. exitCode=${jmhResult.exitCode}")
+                if (jmhResult.stdout.isNotBlank())
+                    println("[JMH STDOUT] ${jmhResult.stdout.take(2000)}")
+                if (jmhResult.stderr.isNotBlank())
+                    println("[JMH STDERR] ${jmhResult.stderr.take(2000)}")
                 return createFailedParsingMetrics(jmhResult)
             }
 
@@ -229,6 +234,8 @@ class PerformanceMeasurerImpl : PerformanceMeasurer {
             return metrics.copy(jmhReportPath = reportPath)
         } catch (e: Exception) {
             println("Ошибка парсинга результатов JMH: ${e.message}")
+            if (jmhResult.stdout.isNotBlank())
+                println("[JMH STDOUT] ${jmhResult.stdout.take(2000)}")
             createFailedParsingMetrics(jmhResult)
         }
     }

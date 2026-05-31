@@ -1,7 +1,9 @@
 import core.EvolutionaryFuzzer
 import core.mutation.AdaptiveMutator
+import core.mutation.strategy.common.MutationStrategy
 import core.seed.BytecodeEntry
 import core.seed.EnergySeedManager
+import core.seed.JavaCode
 import infrastructure.bytecode.JavaByteCodeProvider
 import infrastructure.jit.JITAnalyzer
 import infrastructure.jvm.*
@@ -15,9 +17,20 @@ import infrastructure.translator.JimpleTranslator
 import kotlinx.cli.ArgParser
 import kotlinx.cli.ArgType
 import kotlinx.cli.default
+import llm.client.*
+import llm.generate.*
+import llm.mutation.*
+import llm.parsing.BugsStructure
+import llm.parsing.OpenJdkPerformanceScraper
+import llm.parsing.SingleFilePerBugExporter
 import java.io.File
+import java.io.PrintStream
 
 fun main(args: Array<String>) {
+
+    System.setOut(PrintStream(System.out, true, Charsets.UTF_8))
+    System.setErr(PrintStream(System.err, true, Charsets.UTF_8))
+
     val parser = ArgParser("jvm-perf-fuzzer")
 
     val jvmKeys by parser.option(
@@ -32,7 +45,27 @@ fun main(args: Array<String>) {
 
     val iterations by parser.option(
         ArgType.Int, shortName = "n", description = "Максимальное число итераций"
-    ).default(1000)
+    ).default(100)
+
+    val parseCount by parser.option(
+        ArgType.Int, shortName = "k", description = "Количество для парсинга багов "
+    ).default(50)
+
+    val flagGenerateSeed by parser.option(
+        ArgType.Boolean, shortName = "w", fullName = "generate-seed",
+        description = "true = генерировать Java-программы из багов; false = использовать готовые сиды"
+    ).default(false)
+
+    val flagParseBugs by parser.option(
+        ArgType.Boolean, shortName = "p", fullName = "parse-bugs",
+        description = "true = скачать баги с Jira; false = читать из кэша data/openjdk_bugs"
+    ).default(false)
+
+    val flagGenerateStrategy by parser.option(
+        ArgType.Boolean, shortName = "l", fullName = "generate-strategy",
+        description = "true = генерировать промпты стратегий через LLM; false = читать из кэша data/mutation_prompts.json"
+    ).default(false)
+
 
     val mutationStrategies by parser.option(
         ArgType.String,
@@ -59,6 +92,75 @@ fun main(args: Array<String>) {
     println("Директория аномалий: $anomalyDir")
     println("Анализ JIT-логов: $enableJitAnalysis")
     println("========================================")
+    println("Запуск парсинга")
+
+    // Настройки LLM из resources/setting.json
+    val config = ConfigModel.load()
+    val llmClientGenerator = LlmClientFactory.create(config)
+
+    val configReader = JvmConfigReader()
+    val javaVersion = configReader.getFirstConfiguredJavaVersion()
+
+    println("========================================")
+    println("Будет загружено $parseCount багов с ....")
+
+    val scraper = OpenJdkPerformanceScraper()
+    val cacheDir = File("data/openjdk_bugs")
+    val bugs: List<BugsStructure> = if (flagParseBugs) {
+        val fetched = scraper.searchPerformanceBugs(maxIssues = parseCount)
+        // Сохранение в кэш
+        val exporter = SingleFilePerBugExporter()
+        fetched.forEach { exporter.exportBug(it, cacheDir) }
+        println("[Scraper] Сохранено ${fetched.size} багов в ${cacheDir.path}")
+        fetched
+    } else {
+        scraper.exportPerformanceBugsAsSeparateFiles(40, cacheDir)
+    }
+
+    println("${bugs.size} загружено")
+
+    if (flagGenerateSeed) {
+        println("========================================")
+        println("Генерация java программ")
+
+        // Выбор первой JVM для валидации сгенерированных программ
+        val firstJvmExecutor: JvmExecutor = if (jvmKeys.isNotBlank()) {
+            jvmKeys.split(",")
+                .mapNotNull { JvmType.fromKey(it) }
+                .firstOrNull()
+                ?.let { jvmExecutorFromEnum(it, configReader) }
+                ?: HotSpotJvmExecutor(configReader)
+        } else {
+            HotSpotJvmExecutor(configReader)
+        }
+        println("Валидатор генерации использует JVM: ${firstJvmExecutor::class.simpleName}")
+        val programValidator = GeneratedProgramValidator(firstJvmExecutor, javaVersion)
+        val analyzer = BugPromptAnalyzer(llmClientGenerator)
+        val generator = JavaProgramGenerator(llmClientGenerator, PromptConstructor(), javaVersion)
+
+        val pipeline = JavaGenerationPipeline(analyzer, generator, programValidator, runAfterCompile = false)
+
+        val report = pipeline.processAndSave(
+            bugs = bugs,
+            outputDir = File("src/test/resources/GeneratedFromBugs"),
+        )
+        println(report)
+    } else {
+        println("========================================")
+        println("Генерация java программ пропущена, будут использованы только переданные сиды")
+    }
+
+    val promptExtractor = MutationPromptExtractor(
+        llmClient   = llmClientGenerator,
+        promptsFile = File("data/mutation_prompts.json"),
+    )
+    val mutationPrompts: List<MutationPrompt> = if (flagGenerateStrategy) {
+        promptExtractor.extract(bugs)      // генерация LLM, сохранение  в кэш
+    } else {
+        promptExtractor.loadOnly()         // загрузка из кэша;
+    }
+    println("Промпты для мутаций готовы: ${mutationPrompts.size}")
+    println("========================================")
 
     val packageName = "benchmark"
     val classNames: List<String> = if (seedsDir != defaultSeedsDir) {
@@ -76,24 +178,19 @@ fun main(args: Array<String>) {
             "CollectionBenchmark",
             "CollectionsProcessor",
             "ConditionalExpressionTest",
-            // "ExceptionHandlingExample",
             "ExceptionHandlingPatterns",
             "FloatingPointOperations",
             "LambdaAndStreams",
-            // "MergeSort",
             "MathOperations",
             "MethodInliningTest",
             "MatrixMultiplier",
-            // "PositiveNegative",
             "PrimeChecker",
-            // "RecursiveFibonacci",
             "StringProcessor",
             "SwitchPatternTest",
         )
     }
 
     // ------ JVM executors ------
-    val configReader = JvmConfigReader()
     val jvmExecutors = if (jvmKeys.isNotBlank()) {
         jvmKeys
             .split(",")
@@ -108,22 +205,48 @@ fun main(args: Array<String>) {
     }
 
     // ------ Seeds ------
-    val initialPool = classNames.map { className ->
-        val byteCode = JavaByteCodeProvider("$seedsDir/$className.java").getBytecode()
-        BytecodeEntry(byteCode, className, packageName)
+    val initialPool = classNames.mapNotNull { className ->
+        try {
+            val byteCode = JavaByteCodeProvider("$seedsDir/$className.java").getBytecode()
+            BytecodeEntry(byteCode, className, packageName)
+        } catch (e: Exception) {
+            println("[WARN] Пропускаем сид '$className': ${e.message}")
+            null
+        }
     }
+
+    val javaCodeList: List<String> = JavaCode.load(seedsDir, classNames)
 
     // ------ Мутационные стратегии ------
     val jimpleTranslator = JimpleTranslator()
-    val selectedStrategies = mutationStrategies
+    val promptConstructor = PromptConstructor()
+    val llmClient = OpenAiClient(config)
+
+    val selectedStrategies: List<MutationStrategy> = mutationStrategies
         .split(",")
-        .mapNotNull { name ->
-            runCatching { MutationStrategyType.valueOf(name.trim().uppercase()) }.getOrNull()
-        }
+        .mapNotNull { name -> MutationStrategyType.entries.find { it.name == name.trim() } }
         .map { mutationStrategyFromEnum(it, jimpleTranslator) }
 
-    // Setup components
-    val mutator = AdaptiveMutator(jimpleTranslator, selectedStrategies)
+    // Статические стратегии — присутствуют всегда, независимо от mutation_prompts.json
+    val staticLlmStrategies: List<MutationStrategyLLM> = listOf(
+        RewriteCodeStrategy(promptConstructor, llmClient),
+        ErasureStrategy(promptConstructor, llmClient),
+    )
+
+    val newSelectedStrategies: List<MutationStrategyLLM> = if (mutationPrompts.isNotEmpty()) {
+        val dynamic = mutationPrompts.map { prompt ->
+            DynamicMutationStrategyLLM(prompt, promptConstructor, llmClient)
+        }
+        (staticLlmStrategies + dynamic).also {
+            println("LLM-стратегии: ${it.size} (${staticLlmStrategies.size} статических + ${dynamic.size} динамических)")
+        }
+    } else {
+        println("mutation_prompts.json пуст — будут использвана только статические")
+        staticLlmStrategies
+    }
+
+    val mutator = AdaptiveMutator(jimpleTranslator, selectedStrategies, newSelectedStrategies)
+
     val perfMeasurer = PerformanceMeasurerImpl()
     val perfAnalyzer = PerformanceAnalyzerImpl()
     val anomalyRepository = FileAnomalyRepository(anomalyDir)
@@ -131,7 +254,6 @@ fun main(args: Array<String>) {
     val jitAnalyzer = if (enableJitAnalysis) JITAnalyzer(jitLoggingOptionsProvider!!) else null
     val anomalyVerifier = DetailedMeasurementAnomalyVerifier(perfMeasurer, perfAnalyzer, anomalyRepository, jitAnalyzer)
 
-    // Create fuzzer and executors
     val fuzzer = EvolutionaryFuzzer(
         mutator,
         perfMeasurer,
@@ -142,6 +264,5 @@ fun main(args: Array<String>) {
         maxIterations = iterations
     )
 
-    // Run fuzzer
-    fuzzer.fuzz(initialPool, jvmExecutors)
+    fuzzer.fuzz(initialPool, javaCodeList, jvmExecutors)
 }

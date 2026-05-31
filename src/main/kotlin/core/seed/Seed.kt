@@ -13,6 +13,7 @@ import kotlin.math.max
  */
 data class Seed(
     val bytecodeEntry: BytecodeEntry,
+    var javacode: String,
     val mutationHistory: List<MutationRecord> = emptyList(),
     var energy: Int,
     var description: String,
@@ -25,6 +26,7 @@ data class Seed(
 
     constructor(
         bytecodeEntry: BytecodeEntry,
+        javacode: String,
         mutationHistory: List<MutationRecord> = emptyList(),
         anomalies: List<PerformanceAnomalyGroup> = emptyList(),
         iteration: Int = 0,
@@ -32,6 +34,7 @@ data class Seed(
         verified: Boolean = false
     ) : this(
         bytecodeEntry,
+        javacode,
         mutationHistory,
         calculateEnergy(interestingness),
         generateSeedDescription(SignificanceLevel.NOT_SIGNIFICANT, verified, "", anomalies, iteration),

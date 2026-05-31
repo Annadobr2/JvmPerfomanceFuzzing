@@ -95,6 +95,7 @@ class SimpleFuzzer(
         // Создаем сид с аномалиями
         val seed = Seed(
             bytecodeEntry = BytecodeEntry(bytecode, className, packageName),
+            javacode = "",
             mutationHistory = emptyList(),
             energy = 10,
             description = "simple_fuzzer_anomaly_$mutationCounter",

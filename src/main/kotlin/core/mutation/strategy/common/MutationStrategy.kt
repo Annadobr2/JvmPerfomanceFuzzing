@@ -11,11 +11,12 @@ import java.io.StringWriter
  * Базовый класс для всех стратегий мутации байткода.
  * Обеспечивает шаблонный метод для применения мутаций, выбор метода для мутации и проверку валидности.
  */
-abstract class MutationStrategy(private val jimpleTranslator: JimpleTranslator) {
+abstract class MutationStrategy(private val jimpleTranslator: JimpleTranslator) : CommonMutationStrategy {
 
     /**
      * Применяет стратегию мутации к Jimple-коду.
      */
+
     fun apply(jimpleCode: String, className: String, packageName: String): MutationResult {
         return try {
             val sootClass = jimpleTranslator.parseSootClass(jimpleCode, className, packageName)
